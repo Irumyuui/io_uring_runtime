@@ -1,4 +1,12 @@
-use std::{os::fd::AsRawFd, pin::Pin, sync::Arc, task::Poll};
+use std::{
+    os::fd::AsRawFd,
+    pin::Pin,
+    sync::{
+        Arc,
+        atomic::{AtomicI32, Ordering::*},
+    },
+    task::Poll,
+};
 
 use io_uring::{IoUring, types};
 use parking_lot::Mutex;
@@ -47,8 +55,8 @@ impl Ring {
             let user_meta = cqe.user_data();
             let result = cqe.result();
             unsafe {
-                let io_result = user_meta as *mut Option<i32>;
-                *io_result = Some(result);
+                let io_result = user_meta as *mut AtomicI32;
+                (*io_result).store(result, Release);
             }
         }
 
@@ -68,7 +76,7 @@ pub struct ReadComplection<'a, F: AsRawFd, B: AsIoVec> {
     submited: bool,
 
     #[pin]
-    io_result: Option<i32>, // is it thread safe?
+    io_result: AtomicI32,
 }
 
 impl<'a, F: AsRawFd, B: AsIoVec> ReadComplection<'a, F, B> {
@@ -79,7 +87,7 @@ impl<'a, F: AsRawFd, B: AsIoVec> ReadComplection<'a, F, B> {
             buf,
             offset,
             submited: false,
-            io_result: None,
+            io_result: AtomicI32::new(i32::MIN),
         }
     }
 
@@ -119,21 +127,18 @@ impl<F: AsRawFd, B: AsIoVec> Future for ReadComplection<'_, F, B> {
             return Poll::Pending;
         }
 
-        let mut this = self.as_mut().project();
+        let this = self.as_mut().project();
         if let Err(e) = this.ring.submit() {
             return Poll::Ready(Err(e));
         }
 
-        // because submit is only called in one thread, so is it safety?
-        if let Some(result) = this.io_result.take() {
-            if result < 0 {
-                Poll::Ready(Err(std::io::Error::from_raw_os_error(-result)))
-            } else {
-                Poll::Ready(Ok(result as usize))
+        match this.io_result.load(Acquire) {
+            i32::MIN => {
+                cx.waker().wake_by_ref();
+                Poll::Pending
             }
-        } else {
-            cx.waker().wake_by_ref();
-            Poll::Pending
+            n if n < 0 => Poll::Ready(Err(std::io::Error::from_raw_os_error(-n))),
+            n => Poll::Ready(Ok(n as usize)),
         }
     }
 }
