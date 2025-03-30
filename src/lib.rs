@@ -72,7 +72,6 @@ pub struct ReadComplection<'a, F: AsRawFd, B: AsIoVec> {
     buf: &'a mut B,
     offset: u64,
 
-    #[pin]
     submited: bool,
 
     #[pin]
@@ -92,7 +91,7 @@ impl<'a, F: AsRawFd, B: AsIoVec> ReadComplection<'a, F, B> {
     }
 
     fn try_push_submission_queue(self: &mut Pin<&mut Self>) -> bool {
-        let mut this = self.as_mut().project();
+        let this = self.as_mut().project();
         if *this.submited {
             return true;
         }
